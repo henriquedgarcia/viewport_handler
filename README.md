@@ -1,2 +1,2 @@
 # viewport_handler
-A handler for 360 video preview window 
+A handler for 360° video viewport
