@@ -9,15 +9,11 @@ import cv2
 import numpy as np
 
 Scale = NamedTuple('Scale', [('x', int), ('y', int)])
-class Fov(Scale): pass
-
-
 Point2d = NamedTuple('Point2d', [('x', float), ('y', float)])
 Point3d = NamedTuple('Point3d', [('x', float), ('y', float), ('z', float)])
-# body coordinate system
-Point_bcs = NamedTuple('Point_bcs', [('yaw', float), ('pitch', float), ('roll', float)])
-# horizontal coordinate system
-Point_hcs = NamedTuple('Point_hcs', [('r', float), ('azimuth', float), ('elevation', float)])
+Point_bcs = NamedTuple('Point_bcs', [('yaw', float), ('pitch', float), ('roll', float)])  # body coordinate system
+Point_hcs = NamedTuple('Point_hcs', [('r', float), ('azimuth', float), ('elevation', float)])  # horizontal coordinate system
+class Fov(Scale): pass
 
 
 class Config:
