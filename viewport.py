@@ -269,4 +269,5 @@ if __name__ == '__main__':
     viewport.set_position(Point_bcs(yaw=0, pitch=0, roll=0))
     viewport.project('400x200')
     viewport.show()
+    viewport.save('viewport.png')
     print('Viewport = Fov(120x90), (yaw=0, pitch=0, roll=0)')
