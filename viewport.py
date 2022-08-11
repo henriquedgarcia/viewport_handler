@@ -3,33 +3,106 @@ import math
 import os
 from configparser import ConfigParser
 from itertools import product
-from typing import Dict, List, NamedTuple
-
+from typing import Dict, List, NamedTuple, Union
+from pathlib import Path
 import cv2
 import numpy as np
 
-Scale = NamedTuple('Scale', [('x', int), ('y', int)])
+
+class Projection:
+    proj_uv: np.ndarray = None
+    proj_tp: np.ndarray = None
+    proj_xyv: np.ndarray = None
+
+    def __init__(self, scale: str):
+        self.scale = Scale(scale)
+        self.proj_img = np.zeros(self.scale.shape)
+
+        self.mn2uv()
+        self.uv2tp()
+        self.tp2xyz()
+
+    def mn2uv(self):
+        if self.proj_uv is None:
+            self.proj_uv = np.zeros(self.scale.shape)
+        for n, m in self.scale:
+            u = (m + 0.5) / self.scale.W
+            v = (n + 0.5) / self.scale.H
+            self.proj_uv[n, m] = Point_uv(u, v)
+        return self.proj_uv
+
+    def uv2tp(self):
+        if self.proj_tp is None:
+            self.proj_tp = np.zeros(self.scale.shape)
+        for n, m in self.scale:
+            u, v = self.proj_uv[n, m]
+            theta = (0.5 - v) * np.pi
+            phi = (u - 0.5) * 2 * np.pi
+            self.proj_tp[n, m] = Point_tp(theta, phi)
+        return self.proj_tp
+
+    def tp2xyz(self):
+        if self.proj_xyv is None:
+            self.proj_xyv = np.zeros(self.scale.shape)
+        for n, m in self.scale:
+            theta, phi = self.proj_tp[n, m]
+            x = np.cos(theta) * np.cos(phi)
+            y = np.sin(theta)
+            z = -np.cos(theta) * np.sin(phi)
+            self.proj_xyv[n, m] = Point3d(x, y, z)
+        return self.proj_xyv
+
+    def get_tp_pix(self, theta, phi):
+        v = - theta / np.pi + 0.5
+
+
+Point_tp = NamedTuple('Point_tp', [('theta', float), ('phi', float)])
+Point_uv = NamedTuple('Point_uv', [('u', float), ('v', float)])
+# Scale = NamedTuple('Scale', [('x', int), ('y', int)])
+
+
+class Scale:
+    def __init__(self, scale: str):
+        self.W, self.H = splitx(scale)
+
+    def __str__(self):
+        return f'{self.W}x{self.H}'
+
+    def __iter__(self):
+        return zip(map(range, self.shape))
+
+    @property
+    def shape(self):
+        return self.H, self.W
+
+    @shape.setter
+    def shape(self, mn_tuple: tuple):
+        self.H, self.W = mn_tuple
+
+
 Point2d = NamedTuple('Point2d', [('x', float), ('y', float)])
 Point3d = NamedTuple('Point3d', [('x', float), ('y', float), ('z', float)])
 Point_bcs = NamedTuple('Point_bcs', [('yaw', float), ('pitch', float), ('roll', float)])  # body coordinate system
 Point_hcs = NamedTuple('Point_hcs', [('r', float), ('azimuth', float), ('elevation', float)])  # horizontal coordinate system
 class Fov(Scale): pass
+class Pattern(Scale): pass
 
 
 class Config:
-    project: str
+    project: Union[str, Path]
     data_path: str
     projection: str
-    scale: str
+    scale: Union[str, Scale]
     pattern_list: List[str]
-    pattern: Scale
+    pattern: Union[str, Pattern]
     viewport: dict
     unit: str
     columns_name: Dict[str, Dict]
-    p_res_x: int
     p_res_y: int
+    proj_res: str
     fov_x: int
     fov_y: int
+    fov: Union[str, Fov]
     yaw_col: str
     pitch_col: str
     roll_col: str
@@ -40,11 +113,11 @@ class Config:
         config.read(config_file)
         self.configure(config)
 
-        self.project = f'results/{self.project}'
-        os.makedirs(self.project, exist_ok=True)
+        self.project = Path(f'results/{self.project}')
+        self.project.mkdir(parents=True, exist_ok=True)
 
-        self.fov = Scale(self.fov_x, self.fov_y)
-        self.proj_res = Scale(self.p_res_x, self.p_res_y)
+        self.fov = Fov(self.fov)
+        self.proj_scale = Scale(self.proj_res)
 
     def configure(self, config: ConfigParser) -> None:
         """
@@ -55,10 +128,8 @@ class Config:
         """
         config = config['main']
         for item in config:
-            try:
-                value = float(config[item])
-            except ValueError:
-                value = config[item]
+            import ast
+            value = ast.literal_eval(config[item])
             setattr(self, item, value)
 
 
@@ -74,7 +145,7 @@ class Plane:
 class View:
     center = Point_hcs(1, 0, 0)
 
-    def __init__(self, fov=Scale(0, 0)):
+    def __init__(self, fov='0x0'):
         """
         The viewport is the a region of sphere created by the intersection of
         four planes that pass by center of sphere and the Field of view angles.
@@ -86,9 +157,9 @@ class View:
         :param fov: Field-of-View in degree
         :return: None
         """
-        self.fov = fov
-        fovx = np.deg2rad(fov.x)
-        fovy = np.deg2rad(fov.y)
+        self.fov = Fov(fov)
+        fovx = np.deg2rad(self.fov.H)
+        fovy = np.deg2rad(self.fov.W)
 
         self.p1 = Plane(Point3d(-np.sin(fovy / 2), 0, np.cos(fovy / 2)))
         self.p2 = Plane(Point3d(-np.sin(fovy / 2), 0, -np.cos(fovy / 2)))
@@ -106,16 +177,16 @@ class Viewport:
     position: Point_bcs
     projection: np.ndarray
 
-    def __init__(self, fov: Scale) -> None:
+    def __init__(self, fov: str) -> None:
         """
         Viewport Class used to extract view pixels in projections.
         :param fov:
         """
-        self.fov = fov
+        self.fov = Fov(fov)
         self.default_view = View(fov)
         self.new_view = View(fov)
 
-    def set_position(self, position: Point_bcs) -> View:
+    def set_position(self, position: Point_bcs):
         """
         Set a new position to viewport using aerospace's body coordinate system
         and make the projection. Return numpy.ndarray.
@@ -135,7 +206,7 @@ class Viewport:
         view: View = self.default_view
         new_position: Point_bcs = self.position
 
-        new_view = View(view.fov)
+        new_view = View(f'{view.fov}')
         mat = rot_matrix(new_position)
         new_view.center = Point_hcs(1, new_position[0], new_position[1])
 
@@ -158,8 +229,9 @@ class Viewport:
         :param res: The resolution of the Viewport
         :return: a numpy.ndarray with one deep color
         """
-        projection = np.ones((res.y, res.x), dtype=np.uint8) * 255
-        for j, i in product(range(res.y), range(res.x)):
+        p = Projection(str(res))
+        projection = np.ones(res.shape, dtype=np.uint8) * 255
+        for j, i in res:
             point_hcs = proj2sph(Point2d(i, j), res)
             point_cart = hcs2cart(point_hcs)
             if self.is_viewport(point_cart):
@@ -169,7 +241,7 @@ class Viewport:
     def is_viewport(self, point: Point3d) -> bool:
         """
         Check if the plane equation is true to viewport
-        x1 * x + y1 * y + z1 * z < 0
+        x1 * m + y1 * n + z1 * z < 0
         If True, the "point" is on the viewport
         :param point: A 3D Point in the space.
         :return: A boolean
@@ -194,6 +266,88 @@ class Viewport:
     def save(self, file_path):
         cv2.imwrite(file_path, self.projection)
         print('save ok')
+
+
+class Tiling:
+    def __init__(self, tiling: str, proj_res: str, fov: str):
+        self.fov_x, self.fov_y = splitx(fov)
+        self.viewport = Viewport(fov)
+        self.m, self.n = splitx(tiling)
+        self.proj_res = Scale(proj_res)
+        self.proj_w, self.proj_h = splitx(proj_res)
+        self.total_tiles = self.m * self.n
+        self.tile_w = self.proj_res.W / self.m
+        self.tile_h = self.proj_res.H / self.n
+
+    def __str__(self):
+        return f'({self.m}x{self.n}@{proj_res}.'
+
+    def idx2mn(self, idx):
+        tile_x = idx % self.m
+        tile_y = idx // self.m
+        return tile_x, tile_y
+
+    def get_border(self, idx) -> list:
+        """
+        :param idx: indice do tile.
+        :return: list with all border pixels coordinates
+        """
+        tile_m, tile_n = self.idx2mn(idx)
+        width = self.tile_w
+        high = self.tile_h
+
+        x_i = width * tile_m  # first row
+        x_f = width * (1 + tile_m) - 1  # last row
+        y_i = high * tile_n  # first line
+        y_f = high * (1 + tile_n) - 1  # last line
+        '''
+        [(x_i, y_i), (x_f, y_f)]
+        plt.imshow(tiling.arr),plt.show
+        '''
+
+        border = list(zip(range(x_i, x_f), [y_i] * width))  # upper border
+        border.extend(list(zip(range(x_i, x_f), [y_f] * width)))  # botton border
+        border.extend(list(zip([x_i] * width, range(y_i, y_f))))  # left border
+        border.extend(list(zip([x_f] * width, range(y_i, y_f))))  # right border
+
+        return border
+
+    def get_vptiles(self, position: Point_bcs):
+        """
+        1. seta o viewport na posição position
+        2. para cada 'tile'
+        2.1. pegue a borda do 'tile'
+        2.2. para cada 'ponto' da borda
+        2.2.1. se 'ponto' pertence ao viewport
+        2.2.1.1. marcar tile
+        2.2.1.2. break
+        3. retorna tiles marcados
+        """
+        self.viewport.set_position(position)
+        tiles = []
+        self.arr = np.ones((self.proj_h, self.proj_w))
+        for idx in range(self.total_tiles):
+            border = self.get_border(idx)
+            for (x, y) in border:
+                point = self._unproject(Point2d(x, y))
+
+                if self.viewport.is_viewport(point):
+                    tiles.append(idx)
+                    self.arr[y, x] = 0
+                    # break
+        return tiles
+
+    def _unproject(self, point: Point2d):
+        """
+            Convert a 2D point of ERP projection coordinates to Horizontal Coordinate
+            System (Only ERP Projection)
+            :param point: A point in ERP projection
+            :return: A 3D Point on the sphere
+            """
+        proj_scale = Scale(f'{self.proj_res}')
+        point_hcs = proj2sph(point, proj_scale)
+        point = hcs2cart(point_hcs)
+        return point
 
 
 def splitx(string: str) -> tuple:
@@ -236,8 +390,9 @@ def proj2sph(point: Point2d, res: Scale) -> Point3d:
     """
     # Only ERP Projection
     radius = 1
-    azimuth = (point.x / res.x) * 360 - 180
-    elevation = 90 - (point.y / res.y) * 180
+    azimuth = - 180 + (point.x / res.W) * 360
+    elevation = 90 - (point.y / res.H) * 180
+
     return Point_hcs(radius, azimuth, elevation)
 
 
@@ -264,10 +419,18 @@ def hcs2cart(position: Point_hcs):
     return Point3d(x, y, z)
 
 
+def get_viewport(viewport: Viewport, projejction: Projection):
+    for n, m in projejction.scale:
+        point_tp = projejction.proj_tp[n, m]
+        if viewport.is_viewport(point_tp):
+            pass
+
+
 if __name__ == '__main__':
-    viewport = Viewport(Fov(x=120, y=90))
+    viewport = Viewport('120x90')
     viewport.set_position(Point_bcs(yaw=0, pitch=0, roll=0))
     viewport.project('400x200')
     viewport.show()
     viewport.save('viewport.png')
     print('Viewport = Fov(120x90), (yaw=0, pitch=0, roll=0)')
+
